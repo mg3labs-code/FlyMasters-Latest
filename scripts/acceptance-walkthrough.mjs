@@ -205,7 +205,7 @@ const people = {
   studentA: { address: email("studenta"), first: "QA", last: "StudentA", phone: "9000000014" },
   studentB: { address: email("studentb"), first: "QA", last: "StudentB", phone: "9000000015" },
   // Journeys 4-6
-  studentC: { address: email("studentc"), first: "QA", last: "SignupC", phone: "9000000016" },
+  studentC: { address: email("studentc"), first: "QA", last: `SignupC${STAMP}`, phone: "9000000016" },
   teleB: { address: email("teleb"), first: "QA", last: "TeleBranchB", phone: "9000000017" },
   teleA2: { address: email("telea2"), first: "QA", last: "TeleA2", phone: "9000000018" },
 };
@@ -860,14 +860,28 @@ await step("4.3", "the signup can be put in Branch A from a screen", async () =>
   if (!state.signupId) throw new Blocked("4.2 never found the signup");
   const boss = state.superPage;
   // Look honestly for a control: any branch picker on the leads list or the lead's own page.
-  const places = ["/admin/leads", `/admin/leads/${state.signupId}`];
+  const places = [`/admin/leads/${state.signupId}`, "/admin/leads"];
   const found = [];
+  let picker = null;
   for (const path of places) {
     await boss.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
     await settle(boss, 1800);
-    const pickers = boss.locator("select").filter({ hasText: /branch/i });
-    const buttons = boss.getByRole("button", { name: /branch|move|transfer/i });
-    if ((await pickers.count()) || (await buttons.count())) found.push(path);
+    const candidate = boss.locator("select").filter({ has: boss.locator(`option:text-is("${BRANCH_A}")`) }).first();
+    // Stop at the first screen that has one: a locator does not survive navigating away from it.
+    if (await candidate.count()) { found.push(path); picker = candidate; break; }
+  }
+  if (found.length && picker) {
+    const options = await picker.locator("option").evaluateAll((ns) => ns.map((n) => `${n.value}::${n.textContent}`));
+    const target = options.find((o) => o.endsWith(`::${BRANCH_A}`));
+    if (!target) throw new Fail(`${BRANCH_A} is not offered by the branch control: ${options.join(" | ").slice(0, 160)}`);
+    clearHeard(boss);
+    await picker.selectOption(target.split("::")[0]);
+    await settle(boss, 2500);
+    const after = await asStaff(boss, "/api/state");
+    const row = (after.body?.leads || []).find((r) => String(r.id) === String(state.signupId));
+    if (!row?.branch_id) throw new Fail(`the branch did not save: ${JSON.stringify(row || {}).slice(0, 160)}`);
+    if (String(row.branch_id) !== String(state.branchAId)) throw new Fail("the record landed in the wrong branch");
+    return `set to ${BRANCH_A} from ${found[0]} (Super Admin only; a branch Admin is refused 403)`;
   }
   if (!found.length) {
     // Place it anyway so the rest of the journey can run, and say exactly what was missing.
@@ -899,10 +913,17 @@ await step("4.4", "Admin A finds the lead and gives it to Telecaller A", async (
   if (await mode.count()) { await mode.click(); await page.waitForTimeout(400); }
   const picker = page.locator("main select").first();
   if (!(await picker.count())) throw new Blocked("the alerts screen offers no telecaller picker");
+  // Choose by id, not by the name shown. Display names repeat across runs, and picking an older
+  // account of the same name means assigning a telecaller from another branch - or a deactivated one.
+  const staff = await asStaff(page, "/api/state");
+  const mine = (staff.body?.telecallers || []).find((row) => String(row.email || "").toLowerCase() === people.tele.address);
+  if (!mine) throw new Fail("Telecaller A is not in this Admin's staff list");
+  state.teleAId = mine.id;
   const options = await picker.locator("option").evaluateAll((ns) => ns.map((n) => `${n.value}::${n.textContent}`));
-  const target = options.find((o) => o.includes(people.tele.last) || o.toLowerCase().includes(people.tele.address));
-  if (!target) throw new Fail(`Telecaller A is not offered: ${options.join(" | ").slice(0, 200)}`);
-  await picker.selectOption(target.split("::")[0]);
+  if (!options.some((o) => o.startsWith(`${mine.id}::`))) {
+    throw new Fail(`Telecaller A is not offered by the picker: ${options.join(" | ").slice(0, 200)}`);
+  }
+  await picker.selectOption(String(mine.id));
   await page.waitForTimeout(400);
   const row = page.locator("li, div").filter({ hasText: people.studentC.last })
     .filter({ has: page.getByRole("button", { name: /assign telecaller/i }) }).last();
@@ -912,9 +933,14 @@ await step("4.4", "Admin A finds the lead and gives it to Telecaller A", async (
   clearHeard(page);
   await button.click();
   await settle(page, 2500);
+  const complaint = heardBy(page).find((said) => /could not|not allowed|refus/i.test(said));
   const after = await asStaff(page, "/api/state");
   const lead = (after.body?.leads || []).find((r) => String(r.id) === String(state.signupId));
-  if (!lead?.assigned_telecaller_id) throw new Fail(`the lead still has no telecaller: ${JSON.stringify(lead || {}).slice(0, 160)}`);
+  if (!lead?.assigned_telecaller_id) {
+    throw new Fail(complaint
+      ? `the assignment was refused: ${complaint}`
+      : `the lead still has no telecaller: ${JSON.stringify(lead || {}).slice(0, 160)}`);
+  }
   state.signupTelecallerId = lead.assigned_telecaller_id;
   return `assigned to telecaller ${String(lead.assigned_telecaller_id).slice(0, 8)} from /admin/alerts`;
 });
@@ -1149,7 +1175,21 @@ await step("5.5", "Counselor A opens the student and sees their details and hist
   const student = [...(mine.body?.students || []), ...(mine.body?.leads || [])].find((r) => String(r.id) === String(state.unconvertedId));
   if (!student) throw new Fail("the counselor's own data does not carry the student");
   if (String(student.email || "").length === 0) throw new Fail("the student arrives with no contact details");
-  return `listed with their details (${student.email})`;
+
+  // "Permitted history" is the point of the handover: the counselor taking this student on should be
+  // able to read what the telecaller learned before converting them.
+  const card = page.locator("li, tr, div").filter({ hasText: `Unconverted ${STAMP}` })
+    .filter({ has: page.getByRole("button", { name: /view profile/i }) }).last();
+  if (!(await card.count())) throw new Fail("the student has no profile to open");
+  await card.getByRole("button", { name: /view profile/i }).first().click();
+  await settle(page, 2000);
+  const profile = await textOf(page.locator("body"));
+  const note = `QA conversion note ${STAMP}`;
+  if (!profile.includes(note)) {
+    await shot(page, "5.5-no-history");
+    throw new Fail("the counselor cannot see the telecaller's call history for the student they were handed");
+  }
+  return `listed with their details (${student.email}), and the telecaller's call history is on their profile`;
 });
 
 await step("5.6", "the assignment reads the same on both screens after a refresh", async () => {
@@ -1226,13 +1266,29 @@ await step("6.2", "an Admin can hand the lead to the other telecaller", async ()
   state.teleA2Id = other.id;
 
   // Look for a screen that can move a lead ALREADY assigned to someone.
-  const places = ["/admin/alerts", `/admin/leads/${state.handoverId}`, "/admin/leads"];
+  const places = [`/admin/leads/${state.handoverId}`, "/admin/alerts", "/admin/leads"];
   let control = "";
   for (const path of places) {
     await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
     await settle(page, 1900);
     const body = await textOf(page.locator("main").first());
     if (!body.includes(`Handover ${STAMP}`)) continue;
+    // A picker that offers the other telecaller by name is the control; a read-only label is not.
+    const picker = page.locator("select").filter({ has: page.locator(`option:text-is("${people.teleA2.first} ${people.teleA2.last}")`) }).first();
+    if (await picker.count()) {
+      // By id for the same reason as 4.4: the names repeat across runs.
+      const options = await picker.locator("option").evaluateAll((ns) => ns.map((n) => `${n.value}::${n.textContent}`));
+      if (!options.some((o) => o.startsWith(`${state.teleA2Id}::`))) {
+        throw new Fail(`the other telecaller is not offered: ${options.join(" | ").slice(0, 160)}`);
+      }
+      clearHeard(page);
+      await picker.selectOption(String(state.teleA2Id));
+      await settle(page, 2500);
+      const complaint = heardBy(page).find((said) => /could not/i.test(said));
+      if (complaint) throw new Fail(`the reassignment was refused: ${complaint}`);
+      control = path;
+      break;
+    }
     const reassign = page.locator("li, div").filter({ hasText: `Handover ${STAMP}` })
       .getByRole("button", { name: /assign telecaller|reassign|transfer/i });
     if (await reassign.count()) { control = path; break; }

@@ -16,6 +16,11 @@ import {
 } from "@admin/lib/utils";
 import { Badge } from "@admin/components/ui/Badge";
 import { Card } from "@admin/components/ui/Card";
+import { Select } from "@admin/components/ui/Field";
+import { api } from "@admin/lib/api";
+import { refreshStore } from "@admin/lib/store";
+import { useAuth } from "@admin/context/AuthContext";
+import type { Branch } from "@admin/lib/types";
 
 type Tab = "overview" | "telecaller" | "whatsapp";
 
@@ -55,6 +60,8 @@ export default function LeadDetail() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const store = useAdminStore();
+  const { user: currentUser } = useAuth();
+  const isSuperAdmin = currentUser?.role === "super_admin";
   const [tab, setTab] = useState<Tab>(() => parseTab(searchParams.get("tab")));
 
   const from = searchParams.get("from");
@@ -99,6 +106,43 @@ export default function LeadDetail() {
     () => store.whatsappConversations.find((row) => String(row.lead_id) === String(lead?.id)) || null,
     [lead?.id, store.whatsappConversations],
   );
+
+  // Branches are not in the store, so fetch them once; the Super Admin picker needs their names.
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [saving, setSaving] = useState("");
+  useEffect(() => {
+    void api<{ branches: Branch[] }>("/branches")
+      .then((data) => setBranches((data.branches || []).filter((b) => b.is_active !== false)))
+      .catch(() => setBranches([]));
+  }, []);
+
+  /** Hands the lead to another telecaller. The server refuses anyone outside the caller's branches. */
+  const assignTelecaller = async (telecallerId: string) => {
+    if (!id) return;
+    setSaving("telecaller");
+    try {
+      await api(`/leads/${id}`, { method: "PATCH", body: { assigned_telecaller_id: telecallerId } });
+      await refreshStore();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Could not reassign this lead");
+    } finally {
+      setSaving("");
+    }
+  };
+
+  /** Moves the record to another branch. Super Admin only, enforced on the server. */
+  const assignBranch = async (branchId: string) => {
+    if (!id || !branchId) return;
+    setSaving("branch");
+    try {
+      await api(`/leads/${id}/branch`, { method: "POST", body: { branchId } });
+      await refreshStore();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Could not move this record");
+    } finally {
+      setSaving("");
+    }
+  };
 
   const whatsappMessages = useMemo(
     () =>
@@ -179,9 +223,59 @@ export default function LeadDetail() {
         <dl className="grid grid-cols-[130px_1fr] gap-x-4 gap-y-2 text-sm">
           <dt className="text-slate-500">Telecaller</dt>
           <dd className="font-medium">
-            {telecallerLabel(store.telecallers, lead.assigned_telecaller_id)}
-            {lead.assigned_telecaller_id && lead.assigned_telecaller_at && (
-              <> · assigned {formatWhen(lead.assigned_telecaller_at)}</>
+            {/* Editable: reassignment is an everyday action, and until now the only way to do it was
+                through the API. The list is the one /api/state already sends, which a branch Admin
+                receives filtered to their own branches - and the server checks it again. */}
+            <div className="flex flex-wrap items-center gap-2">
+              <Select
+                className="w-56"
+                value={lead.assigned_telecaller_id || ""}
+                disabled={saving !== ""}
+                onChange={(e) => void assignTelecaller(e.target.value)}
+              >
+                <option value="">Unassigned</option>
+                {store.telecallers.map((row) => (
+                  <option key={row.id} value={row.id}>
+                    {displayName(row.first_name, row.last_name, row.email)}
+                  </option>
+                ))}
+              </Select>
+              {lead.assigned_telecaller_id && lead.assigned_telecaller_at && (
+                <span className="text-xs text-slate-500">assigned {formatWhen(lead.assigned_telecaller_at)}</span>
+              )}
+              {saving === "telecaller" && <span className="text-xs text-slate-500">Saving…</span>}
+            </div>
+          </dd>
+          <dt className="text-slate-500">Branch</dt>
+          <dd className="font-medium">
+            {/* Super Admin only. Moving a record between branches changes who can see it, so it is
+                not a branch Admin's decision - the server refuses them whatever this screen shows. */}
+            {isSuperAdmin ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Select
+                  className="w-56"
+                  value={lead.branch_id || ""}
+                  disabled={saving !== ""}
+                  onChange={(e) => void assignBranch(e.target.value)}
+                >
+                  <option value="">No branch yet</option>
+                  {branches.map((branch) => (
+                    <option key={branch.id} value={branch.id}>{branch.name}</option>
+                  ))}
+                </Select>
+                {!lead.branch_id && (
+                  <span className="text-xs text-amber-700">
+                    Nobody but a Super Admin can see this record until it has a branch.
+                  </span>
+                )}
+                {saving === "branch" && <span className="text-xs text-slate-500">Saving…</span>}
+              </div>
+            ) : (
+              <>
+                {branches.find((b) => b.id === lead.branch_id)?.name
+                  || (lead.branch_id ? "Another branch" : "No branch yet")}
+                <span className="ml-2 text-xs text-slate-500">Only a Super Admin can change this.</span>
+              </>
             )}
           </dd>
           <dt className="text-slate-500">Counselor</dt>

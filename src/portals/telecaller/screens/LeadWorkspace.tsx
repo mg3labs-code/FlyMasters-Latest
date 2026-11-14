@@ -194,9 +194,23 @@ export default function LeadWorkspace() {
       {saved && <Card className="mt-4 border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">{saved}</Card>}
 
       {converted ? (
-        <Card className="mt-4 p-8 text-center text-sm text-slate-500">
-          Converted. You have left the WhatsApp chat. An admin now assigns their country counselor.
-        </Card>
+        <div className="mt-4 grid gap-4">
+          <Card className="p-8 text-center text-sm text-slate-500">
+            Converted. You have left the WhatsApp chat. An admin now assigns their country counselor.
+          </Card>
+          {/* The call history stays visible after conversion. It used to disappear the moment the
+              telecaller converted, which took away the record of their own work just when someone
+              might ask them about it. Read-only: logging a call belongs to the pre-conversion lead. */}
+          {lead.notes && (
+            <Card className="p-5">
+              <p className="font-semibold">Call history</p>
+              <p className="mt-1 text-xs text-slate-500">Your notes from before the handover, kept for reference.</p>
+              <pre className="mt-3 whitespace-pre-wrap font-sans text-sm text-slate-600">
+                {formatNotesDates(lead.notes)}
+              </pre>
+            </Card>
+          )}
+        </div>
       ) : (
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <Card className="p-5">

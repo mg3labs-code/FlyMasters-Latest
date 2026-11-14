@@ -149,12 +149,21 @@ test("lead edits: another branch's lead, or an assignee from another branch, is 
   });
 });
 
-test("moving a lead needs both its current branch and the destination inside the caller's branches", async () => {
+test("moving a lead between branches is Super Admin only", async () => {
+  // Changed 14 Nov 2026, on the owner's instruction. This used to allow a branch Admin to move a lead
+  // as long as BOTH ends were inside their own branches. It no longer does: moving a record changes
+  // who can see it, and an Admin who covers two branches is still not the person who decides which of
+  // them owns the work. The role check now refuses them before any scope question is asked.
   await withWorld({ leads: { leadA: A, leadB: B } }, async (w) => {
     assert.ok(refused(await call(H.leadBranch, { scope: scoped(A), params: { id: "leadB" }, body: { branchId: A } })), "from a foreign branch");
     assert.ok(refused(await call(H.leadBranch, { scope: scoped(A), params: { id: "leadA" }, body: { branchId: B } })), "into a foreign branch");
-    assert.deepEqual(w.writes, []);
-    const ok = await call(H.leadBranch, { scope: scoped(A, B), params: { id: "leadA" }, body: { branchId: B } });
+    assert.ok(
+      refused(await call(H.leadBranch, { scope: scoped(A, B), params: { id: "leadA" }, body: { branchId: B } })),
+      "an Admin holding both branches is still not allowed to move a record between them",
+    );
+    assert.deepEqual(w.writes, [], "a refused move wrote something");
+
+    const ok = await call(H.leadBranch, { role: "super_admin", scope: everything, params: { id: "leadA" }, body: { branchId: B } });
     assert.equal(ok.code, 200, JSON.stringify(ok.body));
     assert.ok(w.writes.length > 0);
   });

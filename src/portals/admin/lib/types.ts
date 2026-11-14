@@ -101,6 +101,10 @@ export interface Lead {
   next_follow_up_date: string | null;
   last_contact_date: string | null;
   conversion_date: string | null;
+  // Which branch owns this record. A portal signup arrives without one, and branch-scoped staff
+  // cannot see a record that belongs to no branch, so the admin screen has to be able to show and
+  // change it.
+  branch_id?: string | null;
   created_at: string | null;
 }
 

@@ -322,6 +322,20 @@ export default function MyStudents() {
               </div>
             </div>
 
+            {/* What the telecaller learned before the handover. The counselor taking the student on is
+                the person who most needs it, and until now it was visible only to an admin. Only this
+                counselor's own students reach this screen, and the server scopes that list by branch,
+                so nothing here widens who can read a note. */}
+            {selected.notes && (
+              <Card className="mt-5 p-4">
+                <div className="flex items-center gap-2">
+                  <Phone className="h-4 w-4 text-sky-500" />
+                  <p className="text-sm font-semibold">Call history before handover</p>
+                </div>
+                <pre className="mt-2 whitespace-pre-wrap font-sans text-sm text-slate-600">{selected.notes}</pre>
+              </Card>
+            )}
+
             <div className="mt-5 grid gap-3 sm:grid-cols-3">
               <Card className="p-4 text-center">
                 <FileText className="mx-auto mb-1 h-5 w-5 text-sky-500" />

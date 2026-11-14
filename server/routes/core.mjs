@@ -2907,13 +2907,32 @@ router.patch("/api/leads/:id", auth, async (req, res) => {
       error: "Only the assigned telecaller can convert a lead. Use the telecaller portal's convert action.",
     });
   }
-  // ACCESS-03B: the lead and any new assignee must be inside the caller's branches.
+  // ACCESS-03B: the lead and any new assignee must be inside the caller's branches. For a branch
+  // Admin this is what limits reassignment to their own people: a telecaller in another branch is
+  // not in their scope, so checkStaffInScope refuses with 403 before anything is written.
   if (!(await allow(res, checkLeadInScope(pool, req.scope, req.params.id)))) return;
   for (const assignee of [patch.assigned_counselor_id, patch.assigned_telecaller_id]) {
     if (assignee && !(await allow(res, checkStaffInScope(pool, req.scope, assignee)))) return;
   }
   const jsonLeads = await jsonTable("student_leads");
   const current = findLeadJsonRecord(jsonLeads, req.params.id);
+
+  // The caller's scope is not the whole question. A Super Admin covers every branch, so scope alone
+  // would let them put a Vizag telecaller on a Hyderabad lead - the lead would then sit in a queue
+  // belonging to a branch that does not own it. The telecaller must work where the lead lives,
+  // whoever is doing the assigning.
+  if (patch.assigned_telecaller_id && current?.branch_id) {
+    const membership = await pool
+      .query("SELECT branch_id FROM user_branches WHERE user_id = $1", [patch.assigned_telecaller_id])
+      .catch(() => ({ rows: [] }));
+    const telecallerBranchIds = membership.rows.map((row) => String(row.branch_id));
+    if (telecallerBranchIds.length && !telecallerBranchIds.includes(String(current.branch_id))) {
+      return res.status(403).json({
+        error: "That telecaller does not work in this record's branch.",
+        code: "CROSS_BRANCH",
+      });
+    }
+  }
   // A counselor is only ever handed an already-converted student — assigning
   // one to a pre-conversion lead is the same bypass /claim used to allow,
   // just from the admin side instead of the counselor side.
@@ -2943,6 +2962,16 @@ router.patch("/api/leads/:id", auth, async (req, res) => {
   }
   const updated = await applyLeadPatch(req.params.id, patch);
   await syncOwnershipOnAssignment(current, updated);
+  // Taking work off one colleague and giving it to another is worth a trail of its own, with both
+  // ends of the move on it.
+  if (patch.assigned_telecaller_id !== undefined
+      && String(patch.assigned_telecaller_id || "") !== String(current?.assigned_telecaller_id || "")) {
+    await audit(req, "lead.telecaller", "student_leads", req.params.id, {
+      from: current?.assigned_telecaller_id || null,
+      to: patch.assigned_telecaller_id || null,
+      branchId: current?.branch_id || null,
+    });
+  }
   if (patch.assigned_telecaller_id) {
     const hasWhatsApp = Boolean(updated.whatsapp_number || updated.phone || updated.lead_source === "whatsapp");
     const waNote = hasWhatsApp ? " Their chat — app and WhatsApp together — is in Messages." : "";
@@ -4495,18 +4524,44 @@ router.put("/api/users/:id/branches", [session, requireRole(ADMIN_ROLES, "Admin"
 });
 
 /** Move a lead to another branch. Both the blob row and the table row. */
-router.post("/api/leads/:id/branch", [session, requireRole(ADMIN_ROLES, "Admin"), branchScope], async (req, res) => {
+/**
+ * Moves a lead, or a student, to another branch. **Super Admin only.**
+ *
+ * A branch Admin moving a record out of their own branch would be handing it to people they do not
+ * manage and losing sight of it themselves; moving one IN would be helping themselves to someone
+ * else's work. Neither is theirs to decide, so the role check is the whole rule here and there is no
+ * scope path for an Admin to fall through - `requireRole` refuses them before any of this runs.
+ *
+ * This is also the only way a portal signup gets a branch at all: someone who signs up on the student
+ * site arrives with none, and branch-scoped staff cannot see a record that belongs to no branch.
+ */
+router.post("/api/leads/:id/branch", [session, requireRole([ROLES.SUPER_ADMIN], "Super Admin"), branchScope], async (req, res) => {
   try {
+    // Checked again inside the handler, not only in the guard above. This is the whole rule for this
+    // route, and a rule that lives in one place is one mounting mistake away from being no rule.
+    if (req.user?.role !== ROLES.SUPER_ADMIN) {
+      return res.status(403).json({ error: "Only a Super Admin can move a record to another branch.", code: "SUPER_ADMIN_ONLY" });
+    }
     const branchId = String(req.body.branchId || "");
     if (!(await branchExists(branchId))) return res.status(400).json({ error: "Unknown branch." });
-    // ACCESS-03B: both where the lead is now and where it is going must be the caller's branches.
-    if (!(await allow(res, checkLeadInScope(pool, req.scope, req.params.id)))) return;
-    if (!branchInScope(req.scope, branchId)) return res.status(403).json({ error: "That branch is outside the branches you manage.", code: "OUT_OF_SCOPE" });
+    const leads = await jsonTable("student_leads");
+    const lead = findLeadJsonRecord(leads, req.params.id);
+    if (!lead) return res.status(404).json({ error: "That record no longer exists." });
+    const from = lead.branch_id ? String(lead.branch_id) : null;
+    if (from === branchId) return res.json({ ok: true, unchanged: true });
+
     await pool.query("UPDATE app_records SET branch_id = $2, updated_at = now() WHERE id = $1 AND table_name = 'student_leads'",
       [req.params.id, branchId]);
     await pool.query("UPDATE student_leads SET branch_id = $2 WHERE id::text = $1", [req.params.id, branchId]).catch(() => {});
-    await audit(req, "lead.branch", "student_leads", req.params.id, { branchId });
-    res.json({ ok: true });
+    // Who moved what, from where, to where. A record changing branch changes who can see it, so the
+    // trail has to carry both ends, not just the destination.
+    await audit(req, "lead.branch", "student_leads", req.params.id, {
+      branchId,
+      from,
+      to: branchId,
+      wasUnplaced: from === null,
+    });
+    res.json({ ok: true, from, to: branchId });
   } catch (error) {
     res.status(500).json({ error: error.message || "Could not move lead" });
   }

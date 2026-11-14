@@ -636,6 +636,49 @@ Both are one control each, on screens that already exist. They are listed here r
 because who may move a record between branches, and who may take work off a colleague, are decisions
 for the people running the office, not for the test harness.
 
+## The two missing controls, built (2026-11-14)
+
+Journeys 4.3 and 6.2 were Blocked on controls the product did not have, with working routes behind
+them. Built to the permission rules the owner set:
+
+**Branch assignment - Super Admin only.** A `Branch` picker on the admin lead page
+(`/admin/leads/:id`). A branch Admin sees the branch as read-only text with "Only a Super Admin can
+change this." Enforced twice on the server: `requireRole([SUPER_ADMIN])` on the route, and the same
+check again inside the handler, because this one rule is otherwise a single mounting mistake away from
+being no rule. A record with no branch carries a plain warning on that screen: *nobody but a Super
+Admin can see this record until it has a branch*, which is what made a portal signup disappear.
+
+**Telecaller reassignment - Super Admin anywhere, branch Admin within their own branch.** The
+`Telecaller` row on the same page is now a picker rather than a label. A branch Admin is offered only
+their own branch's telecallers, and `checkStaffInScope` refuses anyone else with 403 regardless of what
+the screen shows. One rule applies to everybody, Super Admin included: **a telecaller must work in the
+record's branch**, answered with 403 `CROSS_BRANCH`. Scope alone would have let a Super Admin put a
+Vizag telecaller on a Hyderabad lead.
+
+**Audit.** `lead.branch` records `from`, `to` and `wasUnplaced`; `lead.telecaller` records `from` and
+`to` and is written only when the assignee actually changes. A refused attempt writes nothing.
+
+**Conversion notes.** The note already survived conversion; the problem was who could see it. The
+telecaller's own workspace now keeps the call history visible after they convert, and the counselor
+receiving the student sees it on their profile. Neither widens access: a counselor gets only their own
+students, scoped by branch, and the admin view is unchanged.
+
+### Verified
+
+- `tests/leadAssignmentAuthz.db.test.mjs`, 13 checks: a Super Admin places a branch-less signup and
+  moves a record between branches, with both ends on the audit entry; a branch Admin is refused in
+  their own branch and refused when reaching into another, writing nothing either time; a telecaller is
+  refused; an unknown branch is refused before any write; a branch Admin reassigns inside their branch
+  and it is audited; cross-branch reassignment is 403 for a branch Admin AND for a Super Admin;
+  a branch Admin cannot touch a lead outside their branches; a telecaller cannot reassign at all;
+  unassigning is audited and a no-op writes nothing.
+- `tests/scopeGuards.test.mjs` rule changed deliberately: an Admin holding two branches used to be
+  allowed to move a lead between them and no longer is. Recorded in the test itself.
+- The walkthrough now passes all **38 steps** end to end, 4.3 and 6.2 through the new screens.
+- **804/804** on PostgreSQL 16.15, typecheck and build clean.
+
+Still local, not staging. These milestones stay unsigned until the same run passes on Railway.
+
 ## Business journey acceptance, Stream 2 (2026-11-09)
 
 `scripts/acceptance-journey.mjs` runs milestones 2.1 and 2.2 end to end against a deployed environment,
