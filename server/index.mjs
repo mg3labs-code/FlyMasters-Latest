@@ -25,7 +25,7 @@ import { migrate } from "./lib/migrate.mjs";
 import { preflight } from "./lib/preflight.mjs";
 import { alignAssignedLeadBranches } from "./lib/branches.mjs";
 import { pool } from "./lib/db.mjs";
-import { hrEnabled, telecallerHrEnabled } from "./lib/hrSwitch.mjs";
+import { counselorHrEnabled, hrEnabled, telecallerHrEnabled } from "./lib/hrSwitch.mjs";
 import coreRoutes, { startUnassignedWatcher } from "./routes/core.mjs";
 import counselorRoutes from "./routes/counselor.mjs";
 import universityInfoRoutes from "./routes/universityInfo.mjs";
@@ -90,7 +90,7 @@ app.get("/api/version", async (_req, res) => {
     service: "flymaster-platform",
     ...build,
     migrations: await appliedMigrations(pool),
-    features: { hr: hrEnabled(), telecallerHr: telecallerHrEnabled() },
+    features: { hr: hrEnabled(), telecallerHr: telecallerHrEnabled(), counselorHr: counselorHrEnabled() },
     time: new Date().toISOString(),
   });
 });

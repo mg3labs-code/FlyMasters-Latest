@@ -189,9 +189,16 @@ test("rule 8: every HR route checks the HR_ENABLED switch first", () => {
   const counselor = read("server/routes/counselor.mjs");
   for (const [src, marker] of [
     [core, 'router.patch("/api/leave/:id"'], [core, 'router.post("/api/salary"'], [core, 'router.get("/api/hr/state"'],
-    [counselor, 'router.post("/api/counselor/leave"'], [counselor, 'router.post("/api/counselor/attendance"'],
-    [counselor, 'router.patch("/api/counselor/attendance/:id"'],
   ]) assert.match(block(src, marker), /if \(!hrEnabled\(\)\) return hrOff\(res\);/, marker);
+  // The counselor routes check the counselor switch, which follows HR_ENABLED unless
+  // COUNSELOR_HR_ENABLED overrides it (18 Nov 2026 - the portal's own tab asks the same function, so
+  // the screen and the data cannot disagree). The gate is still first, and still shut by default.
+  for (const marker of [
+    'router.post("/api/counselor/leave"', 'router.post("/api/counselor/attendance"',
+    'router.patch("/api/counselor/attendance/:id"',
+  ]) assert.match(block(counselor, marker), /if \(!counselorHrEnabled\(\)\) return hrOff\(res\);/, marker);
+  const counselorGate = block(read("server/lib/hrSwitch.mjs"), "export const counselorHrEnabled =");
+  assert.match(counselorGate, /return hrEnabled\(\);/, "counselor HR must fall back to the HR_ENABLED switch");
   assert.match(read("server/lib/hrSwitch.mjs"), /process\.env\.HR_ENABLED/);
 });
 

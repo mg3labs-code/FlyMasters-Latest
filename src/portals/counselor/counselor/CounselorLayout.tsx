@@ -18,7 +18,7 @@ import {
   X,
   ClipboardCheck,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@counselor/context/AuthContext";
 import { displayName, initials } from "@counselor/lib/utils";
 import { Button } from "@counselor/components/ui/Button";
@@ -26,7 +26,7 @@ import { useLocalStore } from "@counselor/lib/store";
 import NotificationBell from "@counselor/counselor/NotificationBell";
 import AlertCenter from "@shared/components/AlertCenter";
 import { useCaseUnread } from "@shared/lib/useCaseUnread";
-import { HR_ENABLED } from "@shared/lib/features";
+import { askServerAboutHr, type HrState } from "@counselor/lib/hr";
 import { api } from "@counselor/lib/api";
 
 const work = [
@@ -41,20 +41,25 @@ const work = [
   { to: "/notifications", label: "Notifications", icon: Bell },
 ];
 
-const account = [
-  { to: "/profile", label: "My Profile", icon: User },
-  ...(HR_ENABLED
-    ? [
-        { to: "/leave", label: "Leave", icon: Calendar },
-        { to: "/attendance", label: "Attendance", icon: Clock },
-        { to: "/salary", label: "Salary", icon: DollarSign },
-      ]
-    : []),
+const profileItem = { to: "/profile", label: "My Profile", icon: User };
+const hrItems = [
+  { to: "/leave", label: "Leave", icon: Calendar },
+  { to: "/attendance", label: "Attendance", icon: Clock },
+  { to: "/salary", label: "Salary", icon: DollarSign },
 ];
 
 export default function CounselorLayout() {
   const { user, signOut } = useAuth();
   const [open, setOpen] = useState(false);
+  // Asked once per page load and shared with the route guard, so the tab and the page it opens can
+  // never disagree about whether HR is on.
+  const [hr, setHr] = useState<HrState>("unknown");
+  useEffect(() => {
+    let alive = true;
+    void askServerAboutHr().then((answer) => { if (alive) setHr(answer); });
+    return () => { alive = false; };
+  }, []);
+  const account = hr === "on" ? [profileItem, ...hrItems] : [profileItem];
   const [alertCount, setAlertCount] = useState(0);
   const store = useLocalStore();
   const unread = store.notifications.filter((item) => item.user_id === user?.id && !item.is_read).length;

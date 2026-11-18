@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import core from "../server/routes/core.mjs";
 import counselor from "../server/routes/counselor.mjs";
 import { pool } from "../server/lib/db.mjs";
-import { hrEnabled, telecallerHrEnabled } from "../server/lib/hrSwitch.mjs";
+import { counselorHrEnabled, hrEnabled, telecallerHrEnabled } from "../server/lib/hrSwitch.mjs";
 
 const HR_ROUTES = [
   [core, "patch", "/api/leave/:id"],
@@ -82,9 +82,11 @@ test("the state payloads send no leave, attendance or salary rows while HR is of
   assert.match(coreSrc, /leave: hrEnabled\(\) \? sqlLeave\.rows : \[\]/);
   assert.match(coreSrc, /attendance: \(hrEnabled\(\) \? sqlAtt\.rows : \[\]\)\.map/);
   assert.match(coreSrc, /salary: \(hrEnabled\(\) \? sqlSalary\.rows : \[\]\)\.map/);
-  assert.match(counselorSrc, /leave: hrEnabled\(\) \? leave\.rows : \[\]/);
-  assert.match(counselorSrc, /attendance: \(hrEnabled\(\) \? attendance\.rows : \[\]\)\.map/);
-  assert.match(counselorSrc, /salary: \(hrEnabled\(\) \? salary\.rows : \[\]\)\.map/);
+  // The counselor routes read their own switch, which follows HR_ENABLED unless COUNSELOR_HR_ENABLED
+  // overrides it - one function for the data, the writes and the tab.
+  assert.match(counselorSrc, /leave: counselorHrEnabled\(\) \? leave\.rows : \[\]/);
+  assert.match(counselorSrc, /attendance: \(counselorHrEnabled\(\) \? attendance\.rows : \[\]\)\.map/);
+  assert.match(counselorSrc, /salary: \(counselorHrEnabled\(\) \? salary\.rows : \[\]\)\.map/);
 });
 
 // ---- the telecaller override, and being able to see it from outside ----------------------------
@@ -136,4 +138,79 @@ test("the telecaller sidebar hides HR until the server says on, and does not cal
   assert.match(src, /"unknown" \| "on" \| "off"/, "a failed request is being treated as a definite 'off' again");
   assert.match(src, /attempt < 2/, "the one retry for a cold start is gone");
   assert.match(src, /console\.error\(/, "a failed features request is silent again");
+});
+
+
+// ---- the counselor portal, which had the same split ---------------------------------------------
+//
+// Reported 18 Nov 2026: no Attendance tab in the counselor portal. Nothing was broken server-side -
+// the routes, the table and the data were all there and all gated by the HR switch - but the TAB was
+// gated by a flag compiled into the build. A flag in the bundle cannot be checked against the server
+// that holds the data, so the two drifted: the server was returning attendance rows to a portal that
+// had no screen to show them on. The sidebar now asks the server, like the telecaller portal does.
+
+test("counselorHrEnabled follows HR_ENABLED, and the counselor override wins either way", () => {
+  const wasHr = process.env.HR_ENABLED;
+  const wasOwn = process.env.COUNSELOR_HR_ENABLED;
+  const set = (name, value) => { if (value === undefined) delete process.env[name]; else process.env[name] = value; };
+  try {
+    for (const [hr, own, expected] of [
+      [undefined, undefined, false],   // nothing set: off, which is the deployed default
+      ["true", undefined, true],
+      ["false", undefined, false],
+      [undefined, "true", true],       // on for counselors alone
+      ["false", "true", true],
+      ["true", "false", false],        // off for counselors even when HR is on
+      ["true", "", true],              // empty is "unset", not "false"
+      [undefined, "TRUE", true],
+    ]) {
+      set("HR_ENABLED", hr);
+      set("COUNSELOR_HR_ENABLED", own);
+      assert.equal(counselorHrEnabled(), expected, `HR_ENABLED=${hr} COUNSELOR_HR_ENABLED=${own}`);
+    }
+  } finally {
+    set("HR_ENABLED", wasHr);
+    set("COUNSELOR_HR_ENABLED", wasOwn);
+  }
+});
+
+test("/api/version reports the counselor switch too", () => {
+  const src = readFileSync(new URL("../server/index.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const route = src.slice(src.indexOf('app.get("/api/version"'), src.indexOf('app.get("/api/version"') + 700);
+  assert.match(route, /counselorHr:\s*counselorHrEnabled\(\)/,
+    "a deployed host cannot be asked whether counselor HR is on");
+});
+
+test("one switch decides the counselor tab, the data behind it, and the writes", () => {
+  // The whole point: these used to be two switches. If any of these reads drifts back to the global
+  // hrEnabled() while the features endpoint answers counselorHrEnabled(), the tab and the data it
+  // shows can disagree again - which is the bug, not the symptom.
+  const src = readFileSync(new URL("../server/routes/counselor.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  assert.equal(/(^|[^a-zA-Z])hrEnabled\(\)/m.test(src.replace(/counselorHrEnabled\(\)/g, "")), false,
+    "something in the counselor routes still reads the global HR switch");
+  assert.match(src, /router\.get\("\/api\/counselor\/me\/features"/, "the counselor portal has nothing to ask");
+  assert.match(src, /res\.json\(\{ hr: counselorHrEnabled\(\) \}\)/, "the features endpoint does not answer the counselor switch");
+  // Leave, attendance and salary rows, plus the three writes, all behind the same function.
+  assert.ok((src.match(/counselorHrEnabled\(\)/g) || []).length >= 7,
+    "fewer gates than before: a read or a write has stopped checking the switch");
+});
+
+test("the counselor sidebar and its HR routes are gated on the server's answer, not a build flag", () => {
+  const layout = readFileSync(new URL("../src/portals/counselor/counselor/CounselorLayout.tsx", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  assert.doesNotMatch(layout, /HR_ENABLED/, "the sidebar is compiled with the answer baked in again");
+  assert.match(layout, /askServerAboutHr\(\)/, "the sidebar no longer asks the server");
+  assert.match(layout, /hr === "on" \? \[profileItem, \.\.\.hrItems\] : \[profileItem\]/, "the HR tabs are not gated on that answer");
+
+  const app = readFileSync(new URL("../src/portals/counselor/App.tsx", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  assert.doesNotMatch(app, /HR_ENABLED/, "the HR routes are gated by a build flag again");
+  for (const page of ["LeavePage", "AttendancePage", "SalaryPage"]) {
+    assert.match(app, new RegExp(`<HrRoute><${page} /></HrRoute>`), `${page} is not behind the server's answer`);
+  }
+  // A page must not redirect while the answer is still in flight: that looks exactly like "off".
+  assert.match(app, /if \(!asked\) return null;/, "an unanswered request redirects, which is indistinguishable from HR being off");
+
+  const hr = readFileSync(new URL("../src/portals/counselor/lib/hr.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  assert.match(hr, /"unknown" \| "on" \| "off"/, "a failed request is treated as a definite 'off'");
+  assert.match(hr, /console\.error\(/, "a failed features request is silent");
+  assert.match(hr, /asked = null/, "there is no way to forget the cached answer");
 });

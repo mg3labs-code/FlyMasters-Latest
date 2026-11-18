@@ -679,6 +679,45 @@ students, scoped by branch, and the admin view is unchanged.
 
 Still local, not staging. These milestones stay unsigned until the same run passes on Railway.
 
+## Counselor HR: the same split, found a second time (2026-11-18)
+
+Reported: no Attendance tab in the counselor portal.
+
+Nothing was broken on the server. The table, the routes and the data were all there and all gated by
+the HR switch - `/api/counselor/state` was returning attendance rows to a portal that had no screen to
+show them on. The TAB was gated by `VITE_HR_ENABLED`, compiled into the bundle. A flag in the bundle
+cannot be checked against the server that holds the data, so the two drifted apart, and nothing
+anywhere said which of them was wrong. Exactly the telecaller fault of 10 November, in a second portal.
+
+Fixed the same way:
+
+- `counselorHrEnabled()` joins `hrEnabled()` and `telecallerHrEnabled()` in `server/lib/hrSwitch.mjs`:
+  follows `HR_ENABLED`, overridden per portal by `COUNSELOR_HR_ENABLED`. Every counselor HR read and
+  write now goes through it, so the data, the writes and the tab answer to one switch.
+- `GET /api/counselor/me/features` answers it, and the sidebar asks on load.
+- `GET /api/version` now reports `features: { hr, telecallerHr, counselorHr }`.
+- The three HR routes are gated by `HrRoute`, which uses the same single answer as the sidebar and
+  renders nothing while the request is in flight - redirecting early would look exactly like "off".
+- Three states again, not two: `unknown` is a question that could not be asked, says so in the console,
+  and names `/api/version` as the way to settle it.
+
+Verified on a local server, signed in as a counselor:
+
+| `COUNSELOR_HR_ENABLED` | `/api/version` | Sidebar | `/counselor/attendance` |
+|---|---|---|---|
+| unset | `counselorHr: false` | no HR tabs | redirects to `/counselor` |
+| `true` | `counselorHr: true` | Leave, Attendance, Salary | opens, Clock in works |
+
+Clock-in was exercised end to end: the button wrote a `counselor_attendance` row
+(`2026-11-18 present`), and the card read "still on shift" after a reload.
+
+808/808 on PostgreSQL 16.15, typecheck and build clean. `tests/hrSwitch.test.mjs` gained 4 checks
+including one that fails if any counselor HR read drifts back to the global switch; rule 8 of the
+launch contract now pins the counselor gate and its fallback.
+
+**To turn it on:** set `COUNSELOR_HR_ENABLED=true` (or `HR_ENABLED=true` for every portal) and
+restart. No rebuild - the portal asks the server.
+
 ## Business journey acceptance, Stream 2 (2026-11-09)
 
 `scripts/acceptance-journey.mjs` runs milestones 2.1 and 2.2 end to end against a deployed environment,

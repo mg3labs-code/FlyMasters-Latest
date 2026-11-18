@@ -1,7 +1,7 @@
-import { Component, type ReactNode } from "react";
+import { Component, useEffect, useState, type ReactElement, type ReactNode } from "react";
 import RedirectToStaffSignIn from "@shared/RedirectToStaffSignIn";
 import { Navigate, Route, Routes } from "react-router-dom";
-import { HR_ENABLED } from "@shared/lib/features";
+import { askServerAboutHr, type HrState } from "@counselor/lib/hr";
 import { AuthProvider } from "@counselor/context/AuthContext";
 import { RequireAuth } from "@counselor/components/RequireAuth";
 import Auth from "@counselor/pages/Auth";
@@ -53,6 +53,29 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: string }
   }
 }
 
+/**
+ * Opens an HR page only when the server says HR is on - the same single answer the sidebar uses, so a
+ * tab can never lead to a redirect or a hidden tab hide a page that would have worked.
+ *
+ * While the answer is still coming it renders nothing rather than redirecting: bouncing someone to
+ * the dashboard because a request had not finished yet would look exactly like the feature being off.
+ */
+function HrRoute({ children }: { children: ReactElement }) {
+  const [hr, setHr] = useState<HrState>("unknown");
+  const [asked, setAsked] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    void askServerAboutHr().then((answer) => {
+      if (!alive) return;
+      setHr(answer);
+      setAsked(true);
+    });
+    return () => { alive = false; };
+  }, []);
+  if (!asked) return null;
+  return hr === "on" ? children : <Navigate to="/" replace />;
+}
+
 export default function App() {
   return (
     <ErrorBoundary>
@@ -85,9 +108,9 @@ export default function App() {
             <Route path="applications" element={<Applications />} />
             <Route path="notifications" element={<NotificationsPage />} />
             <Route path="profile" element={<CounselorProfile />} />
-            <Route path="leave" element={HR_ENABLED ? <LeavePage /> : <Navigate to="/" replace />} />
-            <Route path="attendance" element={HR_ENABLED ? <AttendancePage /> : <Navigate to="/" replace />} />
-            <Route path="salary" element={HR_ENABLED ? <SalaryPage /> : <Navigate to="/" replace />} />
+            <Route path="leave" element={<HrRoute><LeavePage /></HrRoute>} />
+            <Route path="attendance" element={<HrRoute><AttendancePage /></HrRoute>} />
+            <Route path="salary" element={<HrRoute><SalaryPage /></HrRoute>} />
           </Route>
 
           <Route path="*" element={<NotFound />} />
